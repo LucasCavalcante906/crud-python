@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="pt-BR" class="h-full">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CRUD de Usuários</title>
+<script src="https://cdn.tailwindcss.com/3.4.16"></script>
+<script>
+  tailwind.config = { darkMode: "media" };
+</script>
+<style>
+  /* precisa do !important: as classes utilitárias (flex) vencem o [hidden] do preflight */
+  [hidden]{display:none !important}
+  .scroll-thin::-webkit-scrollbar{width:8px;height:8px}
+  .scroll-thin::-webkit-scrollbar-thumb{background:rgba(120,130,150,.4);border-radius:8px}
+  @keyframes pop{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
+  .animate-pop{animation:pop .16s ease-out}
+</style>
+</head>
+
+<body class="h-full bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100 antialiased">
+
+<!-- ======================= Cabeçalho ======================= -->
+<header class="sticky top-0 z-30 border-b border-slate-200 bg-white/85 backdrop-blur dark:border-slate-800 dark:bg-slate-900/85">
+  <div class="mx-auto flex max-w-6xl flex-wrap items-center gap-3 px-4 py-3">
+    <a href="#/" class="flex items-center gap-2.5 font-semibold tracking-tight">
+      <span class="grid h-8 w-8 place-items-center rounded-lg bg-indigo-600 text-sm font-bold text-white">CU</span>
+      <span>CRUD de Usuários</span>
+    </a>
+
+    <span id="health" class="rounded-full border border-slate-300 px-2.5 py-1 font-mono text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-400">
+      verificando…
+    </span>
+
+    <div class="ml-auto flex items-center gap-2">
+      <button data-action="options"
+        class="hidden rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:border-indigo-500 hover:text-indigo-600 sm:block dark:border-slate-700 dark:text-slate-300 dark:hover:text-indigo-400">
+        OPTIONS /users
+      </button>
+      <button data-action="toggle-log"
+        class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:border-indigo-500 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-300 dark:hover:text-indigo-400">
+        Requisições <span id="logCount" class="ml-1 font-mono text-[10px] text-slate-400">0</span>
+      </button>
+      <button data-action="novo"
+        class="rounded-lg bg-indigo-600 px-3.5 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500">
+        + Novo usuário
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- ======================= Conteúdo ======================= -->
+<main id="view" class="mx-auto max-w-6xl px-4 py-6"></main>
+
+<!-- ======================= Toasts ======================= -->
+<div id="toasts" class="pointer-events-none fixed bottom-4 right-4 z-50 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2"></div>
+
+<!-- ======================= Drawer de requisições ======================= -->
+<aside id="logDrawer" hidden
+  class="fixed inset-y-0 right-0 z-40 flex w-full max-w-md flex-col border-l border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900">
+  <div class="flex items-center justify-between border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+    <h2 class="text-sm font-semibold">Requisições</h2>
+    <button data-action="toggle-log" class="rounded-md px-2 py-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200">✕</button>
+  </div>
+  <div id="log" class="scroll-thin flex-1 overflow-y-auto p-2 font-mono text-[11px]"></div>
+  <p class="border-t border-slate-200 px-4 py-2 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400">
+    Toda chamada que a tela faz à API aparece aqui, com método, rota e status.
+  </p>
+</aside>
+<div id="logBackdrop" hidden data-action="toggle-log" class="fixed inset-0 z-30 bg-slate-900/40 backdrop-blur-sm"></div>
+
+<!-- ======================= Modais ======================= -->
+<div id="modalRoot" hidden class="fixed inset-0 z-50 flex items-end justify-center overflow-y-auto bg-slate-900/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
+  <div id="modalBox" class="animate-pop w-full max-w-lg rounded-t-2xl bg-white shadow-2xl sm:rounded-2xl dark:bg-slate-900"></div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  /* ------------------------------------------------------------------ *
+   * Contrato da API (não alterado pelo front):
+   *   GET    /users?skip&limit  200   · POST   /users          201
+   *   GET    /users/{id}        200   · PUT    /users/{id}     200 (4 campos)
+   *   PATCH  /users/{id}        200   · DELETE /users/{id}     204 (sem corpo)
+   *   HEAD   /users/{id}        200   · OPTIONS /users         204 + header Allow
+   *   404 e 400 -> detail string · 422 -> detail como lista de erros
+   * ------------------------------------------------------------------ */
+
+  // Servido pelo nginx -> /api é o proxy. Aberto como arquivo -> fala direto com a 8000.
+  const API = location.protocol === "file:" ? "http://localhost:8000" : "/api";
+
+  const CAMPOS = [
+    { nome: "nome",      label: "Nome",      max: 100, min: 1, ph: "Maria" },
+    { nome: "sobrenome", label: "Sobrenome", max: 100, min: 1, ph: "Silva" },
+    { nome: "telefone",  label: "Telefone",  max: 20,  min: 8, ph: "+55 11 99999-0000" },
+    { nome: "endereco",  label: "Endereço",  max: 255, min: 1, ph: "Rua das Flores, 123 - São Paulo/SP" },
+  ];
+  const NOMES = CAMPOS.map((c) => c.nome);
+
+  const $ = (s, r = document) => r.querySelector(s);
+  const view = $("#view");
+
+  let estado = { skip: 0, limit: 10 };
+
+  /* ============================ utilidades ============================ */
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  const fmt = (iso) => {
+    const d = new Date(iso);
+    return isNaN(d) ? esc(iso) : d.toLocaleString("pt-BR");
+  };
+
+  const iniciais = (u) => (u.nome[0] || "?").toUpperCase() + (u.sobrenome[0] || "").toUpperCase();
+
+  /* ============================== HTTP =============================== */
+
+  let total = 0;
+
+  function logar(method, path, status) {
+    total++;
+    $("#logCount").textContent = total;
+    const cor = status >= 500 ? "text-rose-500"
+              : status >= 400 ? "text-amber-500"
+              : "text-emerald-500";
+    const li = document.createElement("div");
+    li.className = "flex items-center gap-2 border-b border-slate-100 px-2 py-1.5 dark:border-slate-800";
+    li.innerHTML =
+      `<span class="w-16 shrink-0 font-bold">${method}</span>` +
+      `<span class="flex-1 truncate text-slate-500 dark:text-slate-400">${esc(path)}</span>` +
+      `<span class="${cor} font-bold">${status}</span>`;
+    $("#log").prepend(li);
+  }
+
+  /** Executa a chamada e devolve { status, data, headers }. 204 e HEAD não têm corpo. */
+  async function req(method, path, body) {
+    const opts = { method, headers: {} };
+    if (body !== undefined) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    let res;
+    try {
+      res = await fetch(API + path, opts);
+    } catch (e) {
+      logar(method, path, 0);
+      return { status: 0, data: { detail: "Não foi possível falar com a API." }, headers: new Headers() };
+    }
+    logar(method, path, res.status);
+
+    let data = null;
+    if (res.status !== 204 && method !== "HEAD") {
+      const txt = await res.text();
+      if (txt) { try { data = JSON.parse(txt); } catch { data = txt; } }
+    }
+    return { status: res.status, data, headers: res.headers };
+  }
+
+  /** Converte o corpo de erro do FastAPI em HTML (404/400 = string, 422 = lista). */
+  function erroHtml(status, data) {
+    const detail = data && data.detail;
+    if (Array.isArray(detail)) {
+      const itens = detail.map((e) => {
+        const campo = Array.isArray(e.loc) ? e.loc.filter((p) => p !== "body").join(".") : "";
+        return `<li><span class="font-semibold">${esc(campo || "corpo")}</span>: ${esc(e.msg)}</li>`;
+      }).join("");
+      return `<p class="font-semibold">${status} — validação falhou</p><ul class="mt-1 list-disc space-y-0.5 pl-5">${itens}</ul>`;
+    }
+    const txt = typeof detail === "string" ? detail : "erro inesperado";
+    return `<p><span class="font-semibold">${status}</span> — ${esc(txt)}</p>`;
+  }
+
+  function alerta(html, tipo = "err") {
+    const cor = tipo === "err"
+      ? "border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-900 dark:bg-rose-950/50 dark:text-rose-300"
+      : "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-300";
+    return `<div class="rounded-xl border px-3.5 py-2.5 text-sm ${cor}">${html}</div>`;
+  }
+
+  function toast(texto, tipo = "ok") {
+    const cor = tipo === "err" ? "bg-rose-600" : "bg-slate-900 dark:bg-slate-700";
+    const el = document.createElement("div");
+    el.className = `pointer-events-auto rounded-xl ${cor} px-4 py-2.5 text-sm font-medium text-white shadow-lg animate-pop`;
+    el.textContent = texto;
+    $("#toasts").appendChild(el);
+    setTimeout(() => { el.style.transition = "opacity .3s"; el.style.opacity = "0"; }, 2600);
+    setTimeout(() => el.remove(), 3000);
+  }
+
+  /* ============================== Modal ============================== */
+
+  const modalRoot = $("#modalRoot");
+  const modalBox = $("#modalBox");
+
+  function abrirModal(html) {
+    modalBox.innerHTML = html;
+    modalRoot.hidden = false;
+    document.body.classList.add("overflow-hidden");
+    const primeiro = modalBox.querySelector("input, button[data-confirm]");
+    if (primeiro) primeiro.focus();
+  }
+
+  function fecharModal() {
+    modalRoot.hidden = true;
+    modalBox.innerHTML = "";
+    document.body.classList.remove("overflow-hidden");
+  }
+
+  modalRoot.addEventListener("mousedown", (e) => { if (e.target === modalRoot) fecharModal(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!modalRoot.hidden) fecharModal();
+    else if (!$("#logDrawer").hidden) alternarLog();
+  });
+
+  const INPUT = "mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none " +
+                "placeholder:text-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30 " +
+                "dark:border-slate-700 dark:bg-slate-800 dark:placeholder:text-slate-500";
+  const BTN_1 = "rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50";
+  const BTN_2 = "rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 " +
+                "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent " +
+                "dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800";
+  const BTN_X = "rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500 disabled:opacity-50";
+
+  function cabecalhoModal(titulo, sub) {
+    return `
+      <div class="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 dark:border-slate-800">
+        <div>
+          <h2 class="text-base font-semibold">${esc(titulo)}</h2>
+          <p class="mt-0.5 font-mono text-[11px] text-slate-500 dark:text-slate-400">${esc(sub)}</p>
+        </div>
+        <button type="button" data-fechar class="-mr-1 rounded-md px-2 py-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200">✕</button>
+      </div>`;
+  }
+
+  function campoInput(c, valor = "", extras = "") {
+    return `
+      <div>
+        <label for="f_${c.nome}" class="block text-xs font-semibold text-slate-600 dark:text-slate-300">
+          ${c.label} <span class="font-mono text-[10px] font-normal text-slate-400">${c.nome}</span>
+        </label>
+        <input id="f_${c.nome}" name="${c.nome}" value="${esc(valor)}" maxlength="${c.max}"
+               placeholder="${esc(c.ph)}" autocomplete="off" class="${INPUT}" ${extras}>
+        <p class="mt-1 font-mono text-[10px] text-slate-400">string · ${c.min}–${c.max}</p>
+      </div>`;
+  }
+
+  const lerCampos = () => Object.fromEntries(NOMES.map((n) => [n, $("#f_" + n).value.trim()]));
+
+  /* ---------------------------- modal: POST ---------------------------- */
+
+  function modalCriar() {
+    abrirModal(
+      cabecalhoModal("Novo usuário", "POST /users → 201") + `
+      <form id="formModal" class="space-y-4 px-5 py-5" novalidate>
+        <div id="modalErro"></div>
+        ${CAMPOS.map((c) => campoInput(c)).join("")}
+        <p class="text-xs text-slate-500 dark:text-slate-400">Os quatro campos são obrigatórios no contrato.</p>
+        <div class="flex justify-end gap-2 pt-1">
+          <button type="button" data-fechar class="${BTN_2}">Cancelar</button>
+          <button type="submit" class="${BTN_1}">Criar</button>
+        </div>
+      </form>`);
+
+    $("#formModal").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const r = await req("POST", "/users", lerCampos());
+      if (r.status === 201) {
+        fecharModal();
+        toast(`201 · usuário #${r.data.id} criado`);
+        navegar(`#/users/${r.data.id}`);
+      } else {
+        $("#modalErro").innerHTML = alerta(erroHtml(r.status, r.data));
+      }
+    });
+  }
+
+  /* ---------------------------- modal: PUT ----------------------------- */
+
+  function modalEditar(user) {
+    abrirModal(
+      cabecalhoModal(`Editar usuário #${user.id}`, `PUT /users/${user.id} → 200`) + `
+      <form id="formModal" class="space-y-4 px-5 py-5" novalidate>
+        <div id="modalErro"></div>
+        ${CAMPOS.map((c) => campoInput(c, user[c.nome])).join("")}
+        <p class="text-xs text-slate-500 dark:text-slate-400">
+          O PUT substitui o registro inteiro: os quatro campos são enviados sempre.
+        </p>
+        <div class="flex justify-end gap-2 pt-1">
+          <button type="button" data-fechar class="${BTN_2}">Cancelar</button>
+          <button type="submit" class="${BTN_1}">Salvar tudo</button>
+        </div>
+      </form>`);
+
+    $("#formModal").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const r = await req("PUT", `/users/${user.id}`, lerCampos());
+      if (r.status === 200) {
+        fecharModal();
+        toast(`200 · #${r.data.id} substituído (PUT)`);
+        recarregar();
+      } else {
+        $("#modalErro").innerHTML = alerta(erroHtml(r.status, r.data));
+      }
+    });
+  }
+
+  /* --------------------------- modal: PATCH ---------------------------- */
+
+  function modalPatch(user) {
+    abrirModal(
+      cabecalhoModal(`Atualizar campos de #${user.id}`, `PATCH /users/${user.id} → 200`) + `
+      <form id="formModal" class="space-y-4 px-5 py-5" novalidate>
+        <div id="modalErro"></div>
+        <p class="text-xs text-slate-500 dark:text-slate-400">
+          Marque só o que deve ir no corpo da requisição. O PATCH envia apenas os campos marcados.
+        </p>
+        ${CAMPOS.map((c) => `
+          <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-800">
+            <label class="flex cursor-pointer items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
+              <input type="checkbox" data-inc="${c.nome}" class="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 dark:border-slate-600">
+              ${c.label} <span class="font-mono text-[10px] font-normal text-slate-400">${c.nome}</span>
+            </label>
+            <input id="f_${c.nome}" name="${c.nome}" value="${esc(user[c.nome])}" maxlength="${c.max}"
+                   autocomplete="off" disabled class="${INPUT} disabled:cursor-not-allowed disabled:opacity-50">
+          </div>`).join("")}
+        <div id="previewCorpo" class="rounded-xl bg-slate-100 px-3 py-2 font-mono text-[11px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">corpo: {}</div>
+        <div class="flex justify-end gap-2 pt-1">
+          <button type="button" data-fechar class="${BTN_2}">Cancelar</button>
+          <button type="submit" id="btnPatch" class="${BTN_1}" disabled>Enviar PATCH</button>
+        </div>
+      </form>`);
+
+    const form = $("#formModal");
+
+    function atualizarPreview() {
+      const corpo = corpoPatch();
+      const n = Object.keys(corpo).length;
+      $("#previewCorpo").textContent = "corpo: " + JSON.stringify(corpo);
+      $("#btnPatch").disabled = n === 0;
+    }
+
+    function corpoPatch() {
+      const corpo = {};
+      for (const c of CAMPOS) {
+        if (form.querySelector(`[data-inc="${c.nome}"]`).checked) corpo[c.nome] = $("#f_" + c.nome).value.trim();
+      }
+      return corpo;
+    }
+
+    form.addEventListener("change", (ev) => {
+      const chk = ev.target.closest("[data-inc]");
+      if (chk) $("#f_" + chk.dataset.inc).disabled = !chk.checked;
+      atualizarPreview();
+    });
+    form.addEventListener("input", atualizarPreview);
+
+    form.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const corpo = corpoPatch();
+      if (!Object.keys(corpo).length) {
+        // O contrato responde 400 para um PATCH sem nenhum campo.
+        $("#modalErro").innerHTML = alerta("<p>Marque ao menos um campo — um PATCH vazio é recusado com <span class='font-semibold'>400</span>.</p>");
+        return;
+      }
+      const r = await req("PATCH", `/users/${user.id}`, corpo);
+      if (r.status === 200) {
+        fecharModal();
+        toast(`200 · ${Object.keys(corpo).join(", ")} atualizado(s)`);
+        recarregar();
+      } else {
+        $("#modalErro").innerHTML = alerta(erroHtml(r.status, r.data));
+      }
+    });
+  }
+
+  /* --------------------------- modal: DELETE --------------------------- */
+
+  function modalExcluir(user) {
+    abrirModal(
+      cabecalhoModal("Excluir usuário", `DELETE /users/${user.id} → 204`) + `
+      <div class="space-y-4 px-5 py-5">
+        <div id="modalErro"></div>
+        <p class="text-sm text-slate-600 dark:text-slate-300">
+          Remover <span class="font-semibold text-slate-900 dark:text-slate-100">${esc(user.nome)} ${esc(user.sobrenome)}</span>
+          (#${user.id})? Essa ação não tem volta.
+        </p>
+        <div class="rounded-xl bg-slate-100 px-3.5 py-2.5 text-xs dark:bg-slate-800">
+          <p class="font-mono text-slate-500 dark:text-slate-400">${esc(user.telefone)}</p>
+          <p class="font-mono text-slate-500 dark:text-slate-400">${esc(user.endereco)}</p>
+        </div>
+        <div class="flex justify-end gap-2">
+          <button type="button" data-fechar class="${BTN_2}">Cancelar</button>
+          <button type="button" data-confirm class="${BTN_X}">Excluir</button>
+        </div>
+      </div>`);
+
+    modalBox.querySelector("[data-confirm]").addEventListener("click", async (ev) => {
+      ev.target.disabled = true;
+      const r = await req("DELETE", `/users/${user.id}`);   // 204, sem corpo
+      if (r.status === 204) {
+        fecharModal();
+        toast(`204 · usuário #${user.id} removido`);
+        navegar("#/");
+        carregarLista();
+      } else {
+        ev.target.disabled = false;
+        $("#modalErro").innerHTML = alerta(erroHtml(r.status, r.data));
+      }
+    });
+  }
+
+  /* ========================= Tela: listagem ========================== */
+
+  function telaListaSkeleton() {
+    view.innerHTML = `
+      <div class="mb-5 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 class="text-xl font-semibold tracking-tight">Usuários</h1>
+          <p class="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
+            Listagem paginada · <span class="font-mono text-xs">GET /users?skip&amp;limit</span>
+          </p>
+        </div>
+        <form id="formPag" class="flex items-end gap-2">
+          <div>
+            <label for="skip" class="block text-[11px] font-semibold text-slate-500 dark:text-slate-400">skip</label>
+            <input id="skip" type="number" min="0" step="1" value="${estado.skip}"
+                   class="mt-1 w-20 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800">
+          </div>
+          <div>
+            <label for="limit" class="block text-[11px] font-semibold text-slate-500 dark:text-slate-400">limit</label>
+            <input id="limit" type="number" min="1" max="500" step="1" value="${estado.limit}"
+                   class="mt-1 w-20 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800">
+          </div>
+          <button type="submit" class="${BTN_2} py-1.5">Aplicar</button>
+        </form>
+      </div>
+      <div id="listaMsg" class="mb-4"></div>
+      <div id="listaCorpo"></div>`;
+
+    $("#formPag").addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      estado.skip = Math.max(0, Number($("#skip").value) || 0);
+      estado.limit = Math.min(500, Math.max(1, Number($("#limit").value) || 10));
+      carregarLista();
+    });
+  }
+
+  function renderLista(users) {
+    if (!users.length) {
+      $("#listaCorpo").innerHTML = `
+        <div class="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-16 text-center dark:border-slate-700 dark:bg-slate-900">
+          <p class="text-sm font-medium">Nenhum usuário nesta página.</p>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
+            ${estado.skip > 0 ? "Tente voltar para o começo da lista." : "Crie o primeiro com “+ Novo usuário”."}
+          </p>
+          <button data-action="novo" class="${BTN_1} mt-5">+ Novo usuário</button>
+        </div>` + paginacao(users.length);
+      return;
+    }
+
+    const linhas = users.map((u) => `
+      <tr data-id="${u.id}" class="cursor-pointer border-t border-slate-100 transition hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/60">
+        <td class="px-4 py-3 font-mono text-xs text-slate-400">#${u.id}</td>
+        <td class="px-4 py-3">
+          <div class="flex items-center gap-3">
+            <span class="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300">${esc(iniciais(u))}</span>
+            <div class="min-w-0">
+              <p class="truncate font-medium">${esc(u.nome)} ${esc(u.sobrenome)}</p>
+              <p class="truncate text-xs text-slate-500 dark:text-slate-400 md:hidden">${esc(u.telefone)}</p>
+            </div>
+          </div>
+        </td>
+        <td class="hidden px-4 py-3 text-sm text-slate-600 md:table-cell dark:text-slate-300">${esc(u.telefone)}</td>
+        <td class="hidden max-w-xs truncate px-4 py-3 text-sm text-slate-600 lg:table-cell dark:text-slate-300">${esc(u.endereco)}</td>
+        <td class="hidden px-4 py-3 font-mono text-xs text-slate-400 xl:table-cell">${fmt(u.atualizado_em)}</td>
+        <td class="px-4 py-3 text-right">
+          <span class="text-lg text-slate-300 sm:hidden dark:text-slate-600">›</span>
+          <div class="hidden gap-1 sm:inline-flex">
+            <button data-act="detalhe" data-id="${u.id}" class="rounded-md px-2 py-1 text-xs font-semibold text-indigo-600 hover:bg-indigo-50 dark:text-indigo-400 dark:hover:bg-indigo-500/10">Ver</button>
+            <button data-act="editar" data-id="${u.id}" class="rounded-md px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700">Editar</button>
+            <button data-act="excluir" data-id="${u.id}" class="rounded-md px-2 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-500/10">Excluir</button>
+          </div>
+        </td>
+      </tr>`).join("");
+
+    $("#listaCorpo").innerHTML = `
+      <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <table class="w-full text-left">
+          <thead class="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+            <tr>
+              <th class="px-4 py-2.5 font-semibold">id</th>
+              <th class="px-4 py-2.5 font-semibold">nome</th>
+              <th class="hidden px-4 py-2.5 font-semibold md:table-cell">telefone</th>
+              <th class="hidden px-4 py-2.5 font-semibold lg:table-cell">endereço</th>
+              <th class="hidden px-4 py-2.5 font-semibold xl:table-cell">atualizado_em</th>
+              <th class="px-4 py-2.5"></th>
+            </tr>
+          </thead>
+          <tbody>${linhas}</tbody>
+        </table>
+      </div>` + paginacao(users.length);
+  }
+
+  function paginacao(qtd) {
+    const fim = estado.skip + qtd;
+    return `
+      <div class="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm">
+        <p class="text-slate-500 dark:text-slate-400">
+          ${qtd ? `Exibindo <span class="font-semibold text-slate-700 dark:text-slate-200">${estado.skip + 1}–${fim}</span>` : "Nenhum registro"}
+          · <span class="font-mono text-xs">skip=${estado.skip}&amp;limit=${estado.limit}</span>
+        </p>
+        <div class="flex gap-2">
+          <button data-act="anterior" class="${BTN_2} py-1.5" ${estado.skip === 0 ? "disabled" : ""}>← Anterior</button>
+          <button data-act="proxima" class="${BTN_2} py-1.5" ${qtd < estado.limit ? "disabled" : ""}>Próxima →</button>
+        </div>
+      </div>`;
+  }
+
+  async function carregarLista() {
+    const r = await req("GET", `/users?skip=${estado.skip}&limit=${estado.limit}`);
+    if (r.status === 200) {
+      $("#listaMsg").innerHTML = "";
+      renderLista(r.data);
+    } else {
+      $("#listaMsg").innerHTML = alerta(erroHtml(r.status, r.data));
+      $("#listaCorpo").innerHTML = "";
+    }
+  }
+
+  /* ========================= Tela: detalhe =========================== */
+
+  function linhaInfo(rotulo, campo, valor) {
+    return `
+      <div class="border-b border-slate-100 px-5 py-3.5 last:border-0 dark:border-slate-800">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+          ${rotulo} <span class="font-mono normal-case text-slate-400">· ${campo}</span>
+        </p>
+        <p class="mt-0.5 break-words text-sm">${esc(valor)}</p>
+      </div>`;
+  }
+
+  async function telaDetalhe(id) {
+    view.innerHTML = `<p class="py-20 text-center text-sm text-slate-500">Carregando #${esc(id)}…</p>`;
+
+    const r = await req("GET", `/users/${id}`);
+
+    if (r.status !== 200) {
+      view.innerHTML = `
+        <div class="mx-auto max-w-md rounded-2xl border border-slate-200 bg-white px-6 py-14 text-center shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <p class="text-4xl font-bold text-slate-300 dark:text-slate-700">${r.status}</p>
+          <div class="mt-3">${erroHtml(r.status, r.data)}</div>
+          <a href="#/" class="${BTN_1} mt-6 inline-block">Voltar para a lista</a>
+        </div>`;
+      return;
+    }
+
+    const u = r.data;
+    view.innerHTML = `
+      <a href="#/" class="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-indigo-600 dark:text-slate-400 dark:hover:text-indigo-400">
+        ← Voltar para a lista
+      </a>
+
+      <div class="grid gap-5 lg:grid-cols-3">
+        <!-- cartão principal -->
+        <div class="lg:col-span-2">
+          <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <div class="flex items-center gap-4 border-b border-slate-100 px-5 py-5 dark:border-slate-800">
+              <span class="grid h-14 w-14 shrink-0 place-items-center rounded-full bg-indigo-100 text-lg font-bold text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300">${esc(iniciais(u))}</span>
+              <div class="min-w-0">
+                <h1 class="truncate text-xl font-semibold tracking-tight">${esc(u.nome)} ${esc(u.sobrenome)}</h1>
+                <p class="font-mono text-xs text-slate-500 dark:text-slate-400">id ${u.id} · GET /users/${u.id}</p>
+              </div>
+            </div>
+            ${linhaInfo("Nome", "nome", u.nome)}
+            ${linhaInfo("Sobrenome", "sobrenome", u.sobrenome)}
+            ${linhaInfo("Telefone", "telefone", u.telefone)}
+            ${linhaInfo("Endereço", "endereco", u.endereco)}
+          </div>
+        </div>
+
+        <!-- coluna lateral -->
+        <div class="space-y-5">
+          <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400">Ações</h2>
+            <div class="mt-3 grid gap-2">
+              <button data-act="editar" data-id="${u.id}" class="${BTN_1} w-full">Editar tudo · PUT</button>
+              <button data-act="patch" data-id="${u.id}" class="${BTN_2} w-full">Atualizar campos · PATCH</button>
+              <button data-act="head" data-id="${u.id}" class="${BTN_2} w-full">Checar existência · HEAD</button>
+              <button data-act="excluir" data-id="${u.id}" class="${BTN_X} w-full">Excluir · DELETE</button>
+            </div>
+            <div id="detalheMsg" class="mt-3"></div>
+          </div>
+
+          <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400">Metadados</h2>
+            <dl class="mt-3 space-y-2.5 text-sm">
+              <div>
+                <dt class="font-mono text-[11px] text-slate-400">criado_em</dt>
+                <dd>${fmt(u.criado_em)}</dd>
+              </div>
+              <div>
+                <dt class="font-mono text-[11px] text-slate-400">atualizado_em</dt>
+                <dd>${fmt(u.atualizado_em)}</dd>
+              </div>
+            </dl>
+          </div>
+
+          <details class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wide text-slate-400">Resposta da API</summary>
+            <pre class="scroll-thin mt-3 overflow-x-auto rounded-lg bg-slate-100 p-3 font-mono text-[11px] leading-relaxed dark:bg-slate-800">${esc(JSON.stringify(u, null, 2))}</pre>
+          </details>
+        </div>
+      </div>`;
+  }
+
+  /* ============================ Roteamento ============================ */
+
+  function rotaAtual() {
+    const m = location.hash.match(/^#\/users\/(\d+)$/);
+    return m ? { tela: "detalhe", id: Number(m[1]) } : { tela: "lista" };
+  }
+
+  function navegar(hash) {
+    if (location.hash === hash) render();
+    else location.hash = hash;
+  }
+
+  function render() {
+    const rota = rotaAtual();
+    if (rota.tela === "detalhe") { telaDetalhe(rota.id); return; }
+    telaListaSkeleton();
+    carregarLista();
+  }
+
+  /** Recarrega a tela atual depois de uma alteração. */
+  function recarregar() {
+    const rota = rotaAtual();
+    if (rota.tela === "detalhe") telaDetalhe(rota.id);
+    else carregarLista();
+  }
+
+  window.addEventListener("hashchange", render);
+
+  /* =========================== Interações ============================ */
+
+  /** Busca o usuário antes de abrir um modal que precisa dos dados atuais. */
+  async function comUsuario(id, acao) {
+    const r = await req("GET", `/users/${id}`);
+    if (r.status === 200) acao(r.data);
+    else toast(`${r.status} · usuário ${id} não encontrado`, "err");
+  }
+
+  document.addEventListener("click", async (ev) => {
+    const alvo = ev.target.closest("[data-action], [data-act], [data-fechar], tr[data-id]");
+    if (!alvo) return;
+
+    if (alvo.hasAttribute("data-fechar")) { fecharModal(); return; }
+
+    const acao = alvo.dataset.action;
+    if (acao === "novo") { modalCriar(); return; }
+    if (acao === "toggle-log") { alternarLog(); return; }
+    if (acao === "options") {
+      const r = await req("OPTIONS", "/users");                 // 204 + header Allow
+      toast(`${r.status} · Allow: ${r.headers.get("Allow") || "(não exposto)"}`);
+      return;
+    }
+
+    const act = alvo.dataset.act;
+    const id = alvo.dataset.id;
+
+    if (act === "detalhe") { navegar(`#/users/${id}`); return; }
+    if (act === "editar")  { comUsuario(id, modalEditar); return; }
+    if (act === "patch")   { comUsuario(id, modalPatch); return; }
+    if (act === "excluir") { comUsuario(id, modalExcluir); return; }
+    if (act === "head") {
+      const r = await req("HEAD", `/users/${id}`);              // 200 existe · 404 não
+      const msg = r.status === 200
+        ? alerta(`<p><span class="font-semibold">200</span> — o registro existe (HEAD, sem corpo).</p>`, "ok")
+        : alerta(`<p><span class="font-semibold">${r.status}</span> — o registro não existe (HEAD).</p>`);
+      $("#detalheMsg").innerHTML = msg;
+      return;
+    }
+    if (act === "anterior") {
+      estado.skip = Math.max(0, estado.skip - estado.limit);
+      $("#skip").value = estado.skip;
+      carregarLista();
+      return;
+    }
+    if (act === "proxima") {
+      estado.skip += estado.limit;
+      $("#skip").value = estado.skip;
+      carregarLista();
+      return;
+    }
+
+    // clique na linha da tabela (fora dos botões) abre o detalhe
+    if (alvo.matches("tr[data-id]")) navegar(`#/users/${alvo.dataset.id}`);
+  });
+
+  function alternarLog() {
+    const d = $("#logDrawer"), b = $("#logBackdrop");
+    const abrindo = d.hidden;
+    d.hidden = !abrindo;
+    b.hidden = !abrindo;
+  }
+
+  /* ============================== Health ============================== */
+
+  async function checarSaude() {
+    const r = await req("GET", "/health");
+    const up = r.status === 200 && r.data && r.data.database === "up";
+    const el = $("#health");
+    el.textContent = up ? "API ok · banco up" : r.status === 0 ? "API offline" : "API degradada";
+    el.className = "rounded-full border px-2.5 py-1 font-mono text-[11px] " + (up
+      ? "border-emerald-300 text-emerald-600 dark:border-emerald-800 dark:text-emerald-400"
+      : "border-rose-300 text-rose-600 dark:border-rose-800 dark:text-rose-400");
+  }
+
+  render();
+  checarSaude();
+  setInterval(checarSaude, 30000);
+})();
+</script>
+</body>
+</html>
